@@ -1,11 +1,12 @@
-#include <stdbool.h>
-
 #include "Python.h"
 #include "pycore_code.h"            // write_location_entry_start()
 #include "pycore_compile.h"
+#include "pycore_instruction_sequence.h"
 #include "pycore_opcode_utils.h"    // IS_BACKWARDS_JUMP_OPCODE
-#include "pycore_opcode_metadata.h" // IS_PSEUDO_INSTR, _PyOpcode_Caches
+#include "pycore_opcode_metadata.h" // is_pseudo_target, _PyOpcode_Caches
+#include "pycore_symtable.h"        // _Py_SourceLocation
 
+#include <stdbool.h>
 
 #define DEFAULT_CODE_SIZE 128
 #define DEFAULT_LNOTAB_SIZE 16
@@ -21,9 +22,9 @@
         return ERROR;       \
     }
 
-typedef _PyCompilerSrcLocation location;
-typedef _PyCompile_Instruction instruction;
-typedef _PyCompile_InstructionSequence instr_sequence;
+typedef _Py_SourceLocation location;
+typedef _PyInstruction instruction;
+typedef _PyInstructionSequence instr_sequence;
 
 static inline bool
 same_location(location a, location b)
@@ -125,13 +126,13 @@ assemble_emit_exception_table_item(struct assembler *a, int value, int msb)
     write_except_byte(a, (value&0x3f) | msb);
 }
 
-/* See Objects/exception_handling_notes.txt for details of layout */
+/* See InternalDocs/exception_handling.md for details of layout */
 #define MAX_SIZE_OF_ENTRY 20
 
 static int
 assemble_emit_exception_table_entry(struct assembler *a, int start, int end,
                                     int handler_offset,
-                                    _PyCompile_ExceptHandlerInfo *handler)
+                                    _PyExceptHandlerInfo *handler)
 {
     Py_ssize_t len = PyBytes_GET_SIZE(a->a_except_table);
     if (a->a_except_table_off + MAX_SIZE_OF_ENTRY >= len) {
@@ -157,7 +158,7 @@ static int
 assemble_exception_table(struct assembler *a, instr_sequence *instrs)
 {
     int ioffset = 0;
-    _PyCompile_ExceptHandlerInfo handler;
+    _PyExceptHandlerInfo handler;
     handler.h_label = -1;
     handler.h_startdepth = -1;
     handler.h_preserve_lasti = -1;
@@ -367,17 +368,17 @@ write_instr(_Py_CODEUNIT *codestr, instruction *instr, int ilen)
             codestr->op.code = EXTENDED_ARG;
             codestr->op.arg = (oparg >> 24) & 0xFF;
             codestr++;
-            /* fall through */
+            _Py_FALLTHROUGH;
         case 3:
             codestr->op.code = EXTENDED_ARG;
             codestr->op.arg = (oparg >> 16) & 0xFF;
             codestr++;
-            /* fall through */
+            _Py_FALLTHROUGH;
         case 2:
             codestr->op.code = EXTENDED_ARG;
             codestr->op.arg = (oparg >> 8) & 0xFF;
             codestr++;
-            /* fall through */
+            _Py_FALLTHROUGH;
         case 1:
             codestr->op.code = opcode;
             codestr->op.arg = oparg & 0xFF;
@@ -710,13 +711,13 @@ resolve_unconditional_jumps(instr_sequence *instrs)
         bool is_forward = (instr->i_oparg > i);
         switch(instr->i_opcode) {
             case JUMP:
-                assert(SAME_OPCODE_METADATA(JUMP, JUMP_FORWARD));
-                assert(SAME_OPCODE_METADATA(JUMP, JUMP_BACKWARD));
+                assert(is_pseudo_target(JUMP, JUMP_FORWARD));
+                assert(is_pseudo_target(JUMP, JUMP_BACKWARD));
                 instr->i_opcode = is_forward ? JUMP_FORWARD : JUMP_BACKWARD;
                 break;
             case JUMP_NO_INTERRUPT:
-                assert(SAME_OPCODE_METADATA(JUMP_NO_INTERRUPT, JUMP_FORWARD));
-                assert(SAME_OPCODE_METADATA(JUMP_NO_INTERRUPT, JUMP_BACKWARD_NO_INTERRUPT));
+                assert(is_pseudo_target(JUMP_NO_INTERRUPT, JUMP_FORWARD));
+                assert(is_pseudo_target(JUMP_NO_INTERRUPT, JUMP_BACKWARD_NO_INTERRUPT));
                 instr->i_opcode = is_forward ?
                     JUMP_FORWARD : JUMP_BACKWARD_NO_INTERRUPT;
                 break;
@@ -735,7 +736,9 @@ _PyAssemble_MakeCodeObject(_PyCompile_CodeUnitMetadata *umd, PyObject *const_cac
                            PyObject *consts, int maxdepth, instr_sequence *instrs,
                            int nlocalsplus, int code_flags, PyObject *filename)
 {
-
+    if (_PyInstructionSequence_ApplyLabelMap(instrs) < 0) {
+        return NULL;
+    }
     if (resolve_unconditional_jumps(instrs) < 0) {
         return NULL;
     }
